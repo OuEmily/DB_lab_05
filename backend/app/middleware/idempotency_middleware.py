@@ -2,10 +2,16 @@
 
 import hashlib
 import json
+import datetime
 from typing import Callable
 
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+
+from app.infrastructure.db import SessionLocal
 
 
 class IdempotencyMiddleware(BaseHTTPMiddleware):
@@ -46,10 +52,91 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         - обработайте кейс конкурентных одинаковых ключей
           (уникальный индекс + retry/select existing).
         """
+        idempotency_key = request.headers.get("idempotency-key")
+        
+        if not idempotency_key or request.method != "POST":
+            return await call_next(request)
 
-        # Текущая заглушка: middleware ничего не меняет.
-        # TODO: заменить на полноценную реализацию с БД.
-        return await call_next(request)
+        body = await request.body()
+        
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request._receive = receive
+
+        request_hash = self.build_request_hash(body)
+        method = request.method
+        path = request.url.path
+
+        async with SessionLocal() as session:
+            stmt = text("""
+                SELECT status, status_code, response_body, request_hash
+                FROM idempotency_keys
+                WHERE idempotency_key = :key AND request_method = :method AND request_path = :path
+            """)
+            result = await session.execute(stmt, {"key": idempotency_key, "method": method, "path": path})
+            record = result.mappings().first()
+
+            if record:
+                if record["request_hash"] != request_hash:
+                    return JSONResponse(status_code=409, content={"detail": "Idempotency key reused with different payload"})
+                
+                if record["status"] == "completed":
+                    return JSONResponse(
+                        status_code=record["status_code"],
+                        content=record["response_body"],
+                        headers={"X-Idempotency-Replayed": "true"}
+                    )
+                    
+                if record["status"] == "processing":
+                    return JSONResponse(status_code=409, content={"detail": "Request is already processing"})
+
+            expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.ttl_seconds)
+            try:
+                insert_stmt = text("""
+                    INSERT INTO idempotency_keys (idempotency_key, request_method, request_path, request_hash, status, expires_at)
+                    VALUES (:key, :method, :path, :hash, 'processing', :expires_at)
+                """)
+                await session.execute(insert_stmt, {
+                    "key": idempotency_key, "method": method, "path": path,
+                    "hash": request_hash, "expires_at": expires_at
+                })
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return JSONResponse(status_code=409, content={"detail": "Concurrent request conflict"})
+
+        response = await call_next(request)
+
+        response_body = b""
+        async for chunk in response.body_iterator:
+            response_body += chunk
+
+        new_response = Response(
+            content=response_body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type
+        )
+
+        try:
+            body_obj = json.loads(response_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            body_obj = {"raw": response_body.decode("utf-8")}
+
+        async with SessionLocal() as session:
+            update_stmt = text("""
+                UPDATE idempotency_keys
+                SET status = 'completed', status_code = :status_code, response_body = :body
+                WHERE idempotency_key = :key AND request_method = :method AND request_path = :path
+            """)
+            await session.execute(update_stmt, {
+                "status_code": response.status_code,
+                "body": self.encode_response_payload(body_obj),
+                "key": idempotency_key, "method": method, "path": path
+            })
+            await session.commit()
+
+        return new_response
 
     @staticmethod
     def build_request_hash(raw_body: bytes) -> str:

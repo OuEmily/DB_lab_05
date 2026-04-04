@@ -7,6 +7,7 @@
 
 import uuid
 from typing import Optional
+import asyncio
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,7 +60,39 @@ class PaymentService:
             OrderAlreadyPaidError: если заказ уже оплачен
         """
         # TODO: Реализовать логику оплаты БЕЗ блокировок
-        raise NotImplementedError("TODO: Реализовать PaymentService.pay_order_unsafe")
+        #raise NotImplementedError("TODO: Реализовать PaymentService.pay_order_unsafe")
+
+        async with self.session.begin():
+
+            result = await self.session.execute(
+                text("SELECT status FROM orders WHERE id = :order_id"),
+                {"order_id": order_id}
+            )
+            status = result.scalar_one_or_none()
+
+            if status is None:
+                raise OrderNotFoundError(f"Order {order_id} not found")
+        
+            if status != 'created':
+                raise OrderAlreadyPaidError(f"Order {order_id} already {status}")
+            
+            await asyncio.sleep(0.1)
+    
+            await self.session.execute(
+                text("UPDATE orders SET status = 'paid' WHERE id = :order_id AND status = 'created'"),
+                {"order_id": order_id}
+            )
+
+            await self.session.execute(
+                text("""
+                    INSERT INTO order_status_history (id, order_id, status, changed_at)
+                    VALUES (gen_random_uuid(), :order_id, 'paid', NOW())
+                """),
+                {"order_id": order_id}
+            )
+    
+        return {"order_id": str(order_id), "status": "paid", "message": "Order paid succeessfully"}
+
 
     async def pay_order_safe(self, order_id: uuid.UUID) -> dict:
         """
@@ -108,9 +141,43 @@ class PaymentService:
             OrderAlreadyPaidError: если заказ уже оплачен
         """
         # TODO: Реализовать логику оплаты С блокировками
-        raise NotImplementedError("TODO: Реализовать PaymentService.pay_order_safe")
+
+
+        async with self.session.begin():
+
+            await self.session.execute(
+            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            )
+
+            result = await self.session.execute(
+            text("SELECT status FROM orders WHERE id = :order_id FOR UPDATE"),
+            {"order_id": order_id}
+            )
+            status = result.scalar_one_or_none()
+
+            if status is None:
+                raise OrderNotFoundError(f"Order {order_id} not found")
+        
+            if status != "created":
+                raise OrderAlreadyPaidError(f"Order {order_id} already {status}")
+    
+            await self.session.execute(
+                text("UPDATE orders SET status = 'paid' WHERE id = :order_id AND status = 'created'"),
+                {"order_id": order_id}
+            )
+
+            await self.session.execute(
+            text("""
+                INSERT INTO order_status_history (id, order_id, status, changed_at)
+                VALUES (gen_random_uuid(), :order_id, 'paid', NOW())
+            """),
+            {"order_id": order_id}
+            )
+
+        return {"order_id": str(order_id), "status": "paid", "message": "Order paid succeessfully"}
 
     async def get_payment_history(self, order_id: uuid.UUID) -> list[dict]:
+        
         """
         Получить историю оплат для заказа.
         
@@ -130,4 +197,24 @@ class PaymentService:
             Список словарей с записями об оплате
         """
         # TODO: Реализовать получение истории оплат
-        raise NotImplementedError("TODO: Реализовать PaymentService.get_payment_history")
+        
+        result = await self.session.execute(
+        text("""
+            SELECT id, order_id, status, changed_at
+            FROM order_status_history
+            WHERE order_id = :order_id AND status = 'paid'
+            ORDER BY changed_at
+        """),
+        {"order_id": order_id}
+        )
+
+        history = []
+        for row in result.fetchall():
+            history.append({
+                "id": str(row[0]),
+                "order_id": str(row[1]),
+                "status": row[2],
+                "changed_at": row[3]
+            })
+    
+        return history
