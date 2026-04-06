@@ -27,7 +27,7 @@ class UserRepository:
                       ON CONFLICT (id) DO UPDATE
                       SET email = EXCLUDED.email, name = EXCLUDED.name, created_at = EXCLUDED.created_at
                     """)
-        await self.session.execute(query, {"id": user.id,"email": user.email, "name": user.name, 'created_at': user.created_at})
+        await self.session.execute(query, {"id": user.id, "email": user.email, "name": user.name, "created_at": user.created_at})
         await self.session.commit()
 
     # TODO: Реализовать find_by_id(user_id: UUID) -> Optional[User]
@@ -42,7 +42,6 @@ class UserRepository:
             return None
         
         return User(id=row.id, email=row.email, name=row.name, created_at=row.created_at)
-
 
     # TODO: Реализовать find_by_email(email: str) -> Optional[User]
     async def find_by_email(self, email: str) -> Optional[User]:
@@ -66,6 +65,7 @@ class UserRepository:
         rows = result.fetchall()
         return [User(id=row.id, email=row.email, name=row.name, created_at=row.created_at) for row in rows]
 
+
 class OrderRepository:
     """Репозиторий для Order."""
 
@@ -82,18 +82,19 @@ class OrderRepository:
                      SET status = EXCLUDED.status, total_amount = EXCLUDED.total_amount
                     """)
         await self.session.execute(query_order, {"id": order.id, "user_id": order.user_id,
-                                                "status": order.status.value, 'total_amount': float(order.total_amount),
-                                                "created_at" : order.created_at})
+                                                "status": order.status.value, "total_amount": float(order.total_amount),
+                                                "created_at": order.created_at})
         
         query_item = text(""" 
-                          INSERT INTO orders_items (id, order_id, product_name, price, quantity)
-                          VALUES (:id, :order_id, :product_name, :price, :quantity)
+                          INSERT INTO order_items (id, order_id, product_name, price, quantity, subtotal)
+                          VALUES (:id, :order_id, :product_name, :price, :quantity, :subtotal)
                           ON CONFLICT (id) DO NOTHING
                     """)
         for item in order.items:
             await self.session.execute(query_item, {"id": item.id, "order_id": order.id,
                                                     "product_name": item.product_name,
-                                                    "price": float(item.price), "quantity": item.quantity})
+                                                    "price": float(item.price), "quantity": item.quantity,
+                                                    "subtotal": float(item.subtotal)})
             
         query_history = text("""
                               INSERT INTO order_status_history (id, order_id, status, changed_at)
@@ -113,7 +114,7 @@ class OrderRepository:
         query_order = text("""
                             SELECT id, user_id, status, total_amount, created_at
                             FROM orders
-                            WHERE id = :ids
+                            WHERE id = :id
                         """)
         result = await self.session.execute(query_order, {"id": order_id})
         row = result.fetchone()
@@ -145,8 +146,8 @@ class OrderRepository:
         order = object.__new__(Order)
         order.id = row.id
         order.user_id = row.user_id
-        order.status = OrderStatus(row.status) 
-        order.total_amount = Decimal(str(row.total_amount)) 
+        order.status = OrderStatus(row.status)
+        order.total_amount = Decimal(str(row.total_amount))
         order.created_at = row.created_at
         order.items = items
         order.status_history = status_history
@@ -161,9 +162,9 @@ class OrderRepository:
                             WHERE user_id = :user_id
                             """)
         result = await self.session.execute(query_orders, {"user_id": user_id})
-        order_rows = result.fetchall() 
+        order_rows = result.fetchall()
 
-        all_orders = [] 
+        all_orders = []
 
         for row in order_rows:
             query_items = text("""
@@ -172,7 +173,7 @@ class OrderRepository:
                                 WHERE order_id = :id
                             """)
             res_items = await self.session.execute(query_items, {"id": row.id})
-            items = [OrderItem(id=r.id, product_name=r.product_name, price=Decimal(str(r.price)), 
+            items = [OrderItem(id=r.id, product_name=r.product_name, price=Decimal(str(r.price)),
                                quantity=r.quantity, order_id=r.order_id) for r in res_items.fetchall()]
 
             query_history = text("""
@@ -205,9 +206,9 @@ class OrderRepository:
                             FROM orders
                             """)
         result = await self.session.execute(query_orders)
-        order_rows = result.fetchall() 
+        order_rows = result.fetchall()
 
-        all_orders = [] 
+        all_orders = []
 
         for row in order_rows:
             query_items = text("""
@@ -216,7 +217,7 @@ class OrderRepository:
                                 WHERE order_id = :id
                             """)
             res_items = await self.session.execute(query_items, {"id": row.id})
-            items = [OrderItem(id=r.id, product_name=r.product_name, price=Decimal(str(r.price)), 
+            items = [OrderItem(id=r.id, product_name=r.product_name, price=Decimal(str(r.price)),
                                quantity=r.quantity, order_id=r.order_id) for r in res_items.fetchall()]
 
             query_history = text("""

@@ -19,7 +19,8 @@ class OrderService:
     async def create_order(self, user_id: uuid.UUID) -> Order:
         user = await self.user_repo.find_by_id(user_id)
         if not user:
-            raise UserNotFoundError(f"User with ID {user_id} ws not found!")
+            raise UserNotFoundError(f"User with ID {user_id} was not found!")
+        
         order = Order(user_id=user_id)
         await self.order_repo.save(order)
         
@@ -84,11 +85,9 @@ class OrderService:
     async def list_orders(self, user_id: Optional[uuid.UUID] = None) -> List[Order]:
         if user_id:
             return await self.order_repo.find_by_user(user_id)
-        else:
-            return await self.order_repo.find_all()
+        return await self.order_repo.find_all()
 
     # TODO: Реализовать get_order_history(order_id) -> List[OrderStatusChange]
     async def get_order_history(self, order_id: uuid.UUID) -> List:
         order = await self.get_order(order_id)
-
         return order.status_history
